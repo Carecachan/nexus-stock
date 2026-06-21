@@ -706,7 +706,10 @@
             <div class="app-view-title">Estoque</div>
             <div class="app-view-sub">Todos os produtos cadastrados na sua empresa</div>
           </div>
-          <button class="btn-app-primary" data-goto="view-adicionar">+ Novo produto</button>
+          <div style="display:flex; gap:10px;">
+            <button class="btn-app-secondary" id="btn-export-estoque">⬇ Exportar planilha</button>
+            <button class="btn-app-primary" data-goto="view-adicionar">+ Novo produto</button>
+          </div>
         </div>
         <div class="app-card">
           <div class="app-card-head">
@@ -765,6 +768,7 @@
             <div class="app-view-title">Movimentações</div>
             <div class="app-view-sub">Histórico de entradas e saídas de produtos</div>
           </div>
+          <button class="btn-app-secondary" id="btn-export-movs">⬇ Exportar planilha</button>
         </div>
         <div class="app-card">
           <div class="app-card-head">
@@ -781,6 +785,7 @@
             <div class="app-view-title">Finanças</div>
             <div class="app-view-sub">Calculado a partir das movimentações de saída (vendas)</div>
           </div>
+          <button class="btn-app-secondary" id="btn-export-financas">⬇ Exportar planilha</button>
         </div>
         <div class="fin-tabs" style="margin-bottom:24px;">
           <button class="fin-tab active" id="app-tab-sem">Semana</button>
@@ -875,6 +880,7 @@
 // que às vezes não expõe window.supabase)
 // ══════════════════════════════════════════════
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
 
 const SUPA_URL = 'https://fshztvkrvoktuziuhwdi.supabase.co';
 const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZzaHp0dmtydm9rdHV6aXVod2RpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwMDcyNzQsImV4cCI6MjA5NzU4MzI3NH0.VsCxR3mM5yIvdUaRZCbjB5q_YhfN0jaPfQ0y8y77zUM';
@@ -1572,6 +1578,111 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
     if (e.target === overlay) overlay.classList.remove('open');
   });
 });
+
+// ══════════════════════════════════════════════
+// EXPORTAÇÃO DE PLANILHAS (.xlsx)
+// ══════════════════════════════════════════════
+function nomeArquivoComData(prefixo) {
+  const hoje = new Date();
+  const data = hoje.toLocaleDateString('pt-BR').replace(/\//g, '-');
+  return prefixo + '_' + data + '.xlsx';
+}
+
+function baixarPlanilha(workbook, nomeArquivo) {
+  XLSX.writeFile(workbook, nomeArquivo);
+}
+
+// ── Exportar Estoque ──
+function exportarEstoque() {
+  if (products.length === 0) {
+    toast('Não há produtos para exportar.', true);
+    return;
+  }
+  const linhas = products.map(p => ({
+    'Produto': p.name,
+    'Categoria': p.category || 'Geral',
+    'Quantidade': Number(p.quantity),
+    'Preço de venda (R$)': Number(p.price),
+    'Valor total em estoque (R$)': Number(p.quantity) * Number(p.price),
+    'Limite de alerta': Number(p.low_stock_threshold),
+    'Status': Number(p.quantity) <= 0 ? 'Sem estoque' : (Number(p.quantity) <= Number(p.low_stock_threshold) ? 'Estoque baixo' : 'Em estoque'),
+    'Cadastrado em': new Date(p.created_at).toLocaleDateString('pt-BR')
+  }));
+  const ws = XLSX.utils.json_to_sheet(linhas);
+  ws['!cols'] = [{ wch: 28 }, { wch: 16 }, { wch: 12 }, { wch: 18 }, { wch: 22 }, { wch: 14 }, { wch: 14 }, { wch: 14 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Estoque');
+  baixarPlanilha(wb, nomeArquivoComData('nexus-stock_estoque'));
+  toast('Planilha de estoque exportada.');
+}
+
+// ── Exportar Movimentações ──
+function exportarMovimentacoes() {
+  if (movements.length === 0) {
+    toast('Não há movimentações para exportar.', true);
+    return;
+  }
+  const linhas = movements.map(m => ({
+    'Data': new Date(m.created_at).toLocaleString('pt-BR'),
+    'Produto': m.product_name,
+    'Tipo': m.type === 'entrada' ? 'Entrada' : 'Saída',
+    'Quantidade': Number(m.quantity),
+    'Preço unitário (R$)': Number(m.unit_price),
+    'Valor total (R$)': Number(m.quantity) * Number(m.unit_price)
+  }));
+  const ws = XLSX.utils.json_to_sheet(linhas);
+  ws['!cols'] = [{ wch: 20 }, { wch: 28 }, { wch: 10 }, { wch: 12 }, { wch: 16 }, { wch: 16 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Movimentações');
+  baixarPlanilha(wb, nomeArquivoComData('nexus-stock_movimentacoes'));
+  toast('Planilha de movimentações exportada.');
+}
+
+// ── Exportar Finanças (resumo do período selecionado + detalhamento de vendas) ──
+function exportarFinancas() {
+  const period = window.__appFinPeriod || 'sem';
+  const start = periodStartDate(period);
+  const saidas = movements.filter(m => m.type === 'saida' && new Date(m.created_at) >= start);
+
+  if (saidas.length === 0) {
+    toast('Não há vendas no período selecionado para exportar.', true);
+    return;
+  }
+
+  const receita = saidas.reduce((s, m) => s + Number(m.quantity) * Number(m.unit_price), 0);
+  const custo = receita * 0.4;
+  const lucro = receita - custo;
+  const labelPeriodo = period === 'sem' ? 'Última semana' : period === 'mes' ? 'Último mês' : 'Último ano';
+
+  const resumo = [
+    { 'Indicador': 'Período', 'Valor': labelPeriodo },
+    { 'Indicador': 'Receita (R$)', 'Valor': receita.toFixed(2) },
+    { 'Indicador': 'Custo estimado (R$)', 'Valor': custo.toFixed(2) },
+    { 'Indicador': 'Lucro líquido (R$)', 'Valor': lucro.toFixed(2) }
+  ];
+  const detalhe = saidas.map(m => ({
+    'Data': new Date(m.created_at).toLocaleString('pt-BR'),
+    'Produto': m.product_name,
+    'Quantidade vendida': Number(m.quantity),
+    'Preço unitário (R$)': Number(m.unit_price),
+    'Receita da venda (R$)': Number(m.quantity) * Number(m.unit_price)
+  }));
+
+  const wsResumo = XLSX.utils.json_to_sheet(resumo);
+  wsResumo['!cols'] = [{ wch: 22 }, { wch: 18 }];
+  const wsDetalhe = XLSX.utils.json_to_sheet(detalhe);
+  wsDetalhe['!cols'] = [{ wch: 20 }, { wch: 28 }, { wch: 16 }, { wch: 16 }, { wch: 18 }];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsResumo, 'Resumo');
+  XLSX.utils.book_append_sheet(wb, wsDetalhe, 'Vendas detalhadas');
+  baixarPlanilha(wb, nomeArquivoComData('nexus-stock_financas'));
+  toast('Planilha financeira exportada.');
+}
+
+document.getElementById('btn-export-estoque').addEventListener('click', exportarEstoque);
+document.getElementById('btn-export-movs').addEventListener('click', exportarMovimentacoes);
+document.getElementById('btn-export-financas').addEventListener('click', exportarFinancas);
 </script>
 </body>
 </html>
