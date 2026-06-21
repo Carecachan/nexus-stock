@@ -1033,7 +1033,17 @@ document.getElementById('btn-signup').addEventListener('click', async function()
     var msg = result.error.message;
     if (msg.includes('already registered') || msg.includes('already been registered')) msg = 'Este e-mail já está cadastrado. Tente fazer login.';
     showMsg('msg-signup', msg, 'error');
+    return;
+  }
+
+  // Sem confirmação de e-mail ativada, o Supabase já retorna uma sessão válida.
+  // A pessoa entra direto, sem precisar confirmar nada.
+  if (result.data && result.data.session && result.data.user) {
+    currentUser = result.data.user;
+    showMsg('msg-signup', '✅ Conta criada com sucesso!', 'success');
+    showLoggedMarketing(currentUser.email);
   } else {
+    // Fallback: caso a confirmação de e-mail esteja ativa no projeto.
     showMsg('msg-signup', '✅ Conta criada! Verifique seu e-mail para confirmar o cadastro.', 'success');
   }
 });
@@ -1102,6 +1112,7 @@ async function openApp() {
     return;
   }
   currentUser = user;
+  console.log('[Nexus Stock] Sessão ativa. user.id =', user.id, '| email =', user.email);
   document.getElementById('marketing-site').style.display = 'none';
   document.getElementById('app-shell').style.display = 'block';
   document.getElementById('app-user-email').textContent = currentUser.email;
@@ -1137,7 +1148,6 @@ document.querySelectorAll('[data-goto]').forEach(btn => {
 // CARREGAR DADOS DO SUPABASE
 // ══════════════════════════════════════════════
 async function loadAllData() {
-  document.getElementById('view-dashboard').innerHTML = document.getElementById('view-dashboard').innerHTML; // no-op safeguard
   try {
     const [prodRes, movRes] = await Promise.all([
       sb.from('products').select('*').order('created_at', { ascending: false }),
@@ -1449,7 +1459,12 @@ document.getElementById('btn-add-produto').addEventListener('click', async () =>
   setBtn('btn-add-produto', false, 'Adicionar ao estoque');
 
   if (error) {
-    showMsg('add-msg', 'Erro ao adicionar produto: ' + error.message, 'error');
+    console.error('Erro ao adicionar produto. user.id enviado:', user.id, 'Detalhes:', error);
+    if (error.code === '42501' || (error.message || '').includes('row-level security')) {
+      showMsg('add-msg', 'Erro de permissão ao salvar. Saia da conta, entre novamente e tente de novo. Se persistir, as políticas de segurança do banco precisam ser revisadas.', 'error');
+    } else {
+      showMsg('add-msg', 'Erro ao adicionar produto: ' + error.message, 'error');
+    }
     return;
   }
 
