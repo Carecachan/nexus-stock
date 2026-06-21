@@ -987,7 +987,7 @@ function showLoggedMarketing(email) {
   document.getElementById('auth-title').textContent = 'Você está conectado';
 
   document.getElementById('nav-cta-area').innerHTML =
-    '<div class="nav-user-pill"><span class="nav-user-email">' + email + '</span>' +
+    '<div class="nav-user-pill"><span class="nav-user-email">' + escapeHtml(email) + '</span>' +
     '<button class="btn-nav-app" id="nav-btn-app">Abrir painel</button></div>';
   document.getElementById('nav-btn-app').addEventListener('click', openApp);
 }
@@ -1190,7 +1190,7 @@ function renderDashboard() {
 
   const alertSlot = document.getElementById('dash-alert-slot');
   if (baixos.length > 0) {
-    const nomes = baixos.slice(0, 3).map(p => p.name).join(', ');
+    const nomes = baixos.slice(0, 3).map(p => escapeHtml(p.name)).join(', ');
     const resto = baixos.length > 3 ? ' e mais ' + (baixos.length - 3) : '';
     alertSlot.innerHTML =
       '<div class="alert-banner"><div class="alert-banner-icon">⚠️</div>' +
