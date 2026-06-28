@@ -653,9 +653,8 @@
       <div class="auth-sub">Crie sua conta gratuita agora</div>
       <div class="msg-box" id="msg-signup"></div>
       <div class="form-group">
-        <label class="form-label">E-mail</label>
+        <label class="form-label">E-mail da empresa</label>
         <input type="email" class="form-input" id="su-email" placeholder="empresa@exemplo.com.br" autocomplete="email" />
-        <div class="field-hint" style="color:rgba(255,255,255,0.4)">Usado apenas para recuperação de senha. O login é feito com o ID que você recebe ao criar a conta.</div>
       </div>
       <div class="form-group">
         <label class="form-label">Senha</label>
@@ -670,31 +669,14 @@
       <div class="auth-footer">Já tem uma conta? <span class="auth-link" id="go-login">Entrar</span></div>
     </div>
 
-    <!-- CONTA CRIADA: exibição do ID Nexus gerado -->
-    <div class="auth-card" id="card-id-criado" style="display:none">
-      <div class="auth-logo">Nexus<span>Stock</span></div>
-      <div class="logged-center">
-        <div class="logged-icon">🎉</div>
-        <div class="logged-name">Conta criada com sucesso!</div>
-        <div class="logged-email">Guarde seu ID — é com ele que você entra na sua conta</div>
-      </div>
-      <div style="background:rgba(15,82,186,0.12); border:1px solid rgba(15,82,186,0.4); border-radius:12px; padding:20px; text-align:center; margin:20px 0;">
-        <div style="font-size:12px; color:rgba(255,255,255,0.5); margin-bottom:6px; text-transform:uppercase; letter-spacing:1px;">Seu ID Nexus</div>
-        <div id="novo-nexus-id" style="font-family:'Space Grotesk',sans-serif; font-size:28px; font-weight:700; color:#7EB3FF; letter-spacing:1px;">NX-00000</div>
-      </div>
-      <div class="field-hint" style="text-align:center; margin-bottom:16px;">Anote esse ID. Ele substitui o e-mail no momento de entrar na sua conta.</div>
-      <button class="btn-form-app" id="btn-id-criado-continuar">Abrir painel da empresa →</button>
-    </div>
-
     <!-- LOGIN -->
     <div class="auth-card" id="card-login" style="display:none">
       <div class="auth-logo">Nexus<span>Stock</span></div>
       <div class="auth-sub">Entre na sua conta</div>
       <div class="msg-box" id="msg-login"></div>
       <div class="form-group">
-        <label class="form-label">ID Nexus</label>
-        <input type="text" class="form-input" id="li-nexus-id" placeholder="NX-00001" autocomplete="username" style="text-transform:uppercase" />
-        <div class="field-hint" style="color:rgba(255,255,255,0.4)">O ID que você recebeu ao criar a conta.</div>
+        <label class="form-label">E-mail da empresa</label>
+        <input type="email" class="form-input" id="li-email" placeholder="empresa@exemplo.com.br" autocomplete="email" />
       </div>
       <div class="form-group">
         <label class="form-label">Senha</label>
@@ -1028,34 +1010,6 @@ function withTimeout(promise, ms) {
   });
 }
 
-// Busca o ID Nexus (NX-00001) do usuário logado, lendo da tabela profiles.
-// É esse ID que aparece para a pessoa em toda a interface — o e-mail
-// nunca é mostrado, fica só por trás dos panos para o Supabase Auth.
-async function getNexusId(userId) {
-  try {
-    const { data, error } = await withTimeout(
-      sb.from('profiles').select('nexus_id').eq('id', userId).maybeSingle(),
-      10000
-    );
-    if (error || !data) return null;
-    return data.nexus_id;
-  } catch (e) {
-    console.error('getNexusId falhou/expirou:', e);
-    return null;
-  }
-}
-
-// Resolve um ID Nexus digitado no login para o e-mail real correspondente,
-// chamando a function segura no banco (não expõe a tabela inteira).
-async function resolveEmailFromNexusId(nexusId) {
-  const { data, error } = await withTimeout(
-    sb.rpc('get_email_by_nexus_id', { p_nexus_id: nexusId }),
-    10000
-  );
-  if (error) throw error;
-  return data || null;
-}
-
 // ── Helpers genéricos ──
 function showMsg(id, text, type) {
   const el = document.getElementById(id);
@@ -1139,16 +1093,15 @@ let currentUser = null;
 let products = [];      // cache local dos produtos do usuário logado
 let movements = [];     // cache local das movimentações
 
-function showLoggedMarketing(nexusId) {
+function showLoggedMarketing(email) {
   document.getElementById('card-signup').style.display = 'none';
-  document.getElementById('card-id-criado').style.display = 'none';
   document.getElementById('card-login').style.display = 'none';
   document.getElementById('card-logged').style.display = 'block';
-  document.getElementById('logged-email').textContent = nexusId || '—';
+  document.getElementById('logged-email').textContent = email || '—';
   document.getElementById('auth-title').textContent = 'Você está conectado';
 
   document.getElementById('nav-cta-area').innerHTML =
-    '<div class="nav-user-pill"><span class="nav-user-email">' + escapeHtml(nexusId || '') + '</span>' +
+    '<div class="nav-user-pill"><span class="nav-user-email">' + escapeHtml(email || '') + '</span>' +
     '<button class="btn-nav-app" id="nav-btn-app">Abrir painel</button></div>';
   document.getElementById('nav-btn-app').addEventListener('click', async function() {
     setBtn('nav-btn-app', true, 'Abrir painel', 'Abrindo...');
@@ -1162,7 +1115,6 @@ function showLoggedMarketing(nexusId) {
 
 function showLoggedOutMarketing() {
   document.getElementById('card-logged').style.display = 'none';
-  document.getElementById('card-id-criado').style.display = 'none';
   document.getElementById('card-login').style.display = 'none';
   document.getElementById('card-signup').style.display = 'block';
   document.getElementById('auth-title').textContent = 'Crie sua conta';
@@ -1173,14 +1125,12 @@ function showLoggedOutMarketing() {
 // ── Alternar formulários cadastro/login ──
 document.getElementById('go-login').addEventListener('click', function() {
   document.getElementById('card-signup').style.display = 'none';
-  document.getElementById('card-id-criado').style.display = 'none';
   document.getElementById('card-login').style.display = 'block';
   document.getElementById('auth-title').textContent = 'Entre na sua conta';
   hideMsg('msg-login');
 });
 document.getElementById('go-signup').addEventListener('click', function() {
   document.getElementById('card-login').style.display = 'none';
-  document.getElementById('card-id-criado').style.display = 'none';
   document.getElementById('card-signup').style.display = 'block';
   document.getElementById('auth-title').textContent = 'Crie sua conta';
   hideMsg('msg-signup');
@@ -1213,23 +1163,8 @@ document.getElementById('btn-signup').addEventListener('click', async function()
     // A pessoa entra direto, sem precisar confirmar nada.
     if (result.data && result.data.session && result.data.user) {
       currentUser = result.data.user;
-
-      // O trigger do banco gera o ID Nexus no instante do cadastro, mas pode
-      // levar um instante para o registro ficar visível. Tentamos algumas
-      // vezes antes de desistir, em vez de mostrar "não encontrado" de cara.
-      var nexusId = await getNexusIdComEspera(currentUser.id);
-
-      document.getElementById('card-signup').style.display = 'none';
-      if (nexusId) {
-        document.getElementById('novo-nexus-id').textContent = nexusId;
-        document.getElementById('card-id-criado').style.display = 'block';
-        document.getElementById('auth-title').textContent = 'Conta criada';
-      } else {
-        // Conta foi criada e a pessoa já está autenticada, mas o ID ainda
-        // não apareceu. Não bloqueia o acesso — leva direto pro painel.
-        showMsg('msg-signup', 'Conta criada! Não foi possível confirmar seu ID agora, mas você já pode acessar o painel.', 'success');
-        showLoggedMarketing(null);
-      }
+      showMsg('msg-signup', '✅ Conta criada com sucesso!', 'success');
+      showLoggedMarketing(currentUser.email);
     } else {
       // Fallback: caso a confirmação de e-mail esteja ativa no projeto.
       showMsg('msg-signup', '✅ Conta criada! Verifique seu e-mail para confirmar o cadastro.', 'success');
@@ -1242,58 +1177,24 @@ document.getElementById('btn-signup').addEventListener('click', async function()
   }
 });
 
-// Tenta buscar o nexus_id algumas vezes, com pequena espera entre as
-// tentativas, para cobrir o instante entre o cadastro e o trigger do
-// banco terminar de criar a linha em profiles.
-async function getNexusIdComEspera(userId) {
-  for (var i = 0; i < 4; i++) {
-    var id = await getNexusId(userId);
-    if (id) return id;
-    await new Promise(function(r) { setTimeout(r, 700); });
-  }
-  return null;
-}
-
-document.getElementById('btn-id-criado-continuar').addEventListener('click', async function() {
-  setBtn('btn-id-criado-continuar', true, 'Abrir painel da empresa →', 'Abrindo...');
-  try {
-    var nexusId = await getNexusId(currentUser.id);
-    document.getElementById('card-id-criado').style.display = 'none';
-    showLoggedMarketing(nexusId);
-  } catch (err) {
-    console.error('Erro ao continuar após cadastro:', err);
-    toast('Não foi possível abrir o painel agora. Tente novamente.', true);
-  } finally {
-    setBtn('btn-id-criado-continuar', false, 'Abrir painel da empresa →');
-  }
-});
-
 // ── LOGIN ──
 document.getElementById('btn-login').addEventListener('click', async function() {
-  var nexusIdRaw = document.getElementById('li-nexus-id').value.trim();
+  var email = document.getElementById('li-email').value.trim();
   var pass = document.getElementById('li-pass').value;
   hideMsg('msg-login');
 
-  if (!nexusIdRaw || !pass) { showMsg('msg-login','Preencha seu ID e senha.','error'); return; }
+  if (!email || !pass) { showMsg('msg-login','Preencha e-mail e senha.','error'); return; }
 
   setBtn('btn-login', true, 'Entrar');
 
   try {
-    var nexusId = nexusIdRaw.toUpperCase();
-    var email = await resolveEmailFromNexusId(nexusId);
-
-    if (!email) {
-      showMsg('msg-login', 'ID não encontrado. Verifique e tente novamente.', 'error');
-      return;
-    }
-
     var result = await withTimeout(sb.auth.signInWithPassword({ email: email, password: pass }), 15000);
 
     if (result.error) {
-      showMsg('msg-login', 'ID ou senha incorretos.', 'error');
+      showMsg('msg-login', 'E-mail ou senha incorretos.', 'error');
     } else {
       currentUser = result.data.user;
-      showLoggedMarketing(nexusId);
+      showLoggedMarketing(currentUser.email);
     }
   } catch (err) {
     console.error('Erro no login:', err);
@@ -1343,18 +1244,13 @@ document.getElementById('btn-go-app').addEventListener('click', async function()
 
 // ── Manter currentUser sempre sincronizado com a sessão real do client ──
 // (login, logout, refresh de token, restauração de sessão ao recarregar a página)
-sb.auth.onAuthStateChange(async function(event, session) {
+sb.auth.onAuthStateChange(function(event, session) {
   if (session && session.user) {
     currentUser = session.user;
-    try {
-      var nexusId = await getNexusId(currentUser.id);
-      if (document.getElementById('app-shell').style.display !== 'block') {
-        showLoggedMarketing(nexusId);
-      } else {
-        document.getElementById('app-user-email').textContent = nexusId || '';
-      }
-    } catch (err) {
-      console.error('Erro ao sincronizar sessão:', err);
+    if (document.getElementById('app-shell').style.display !== 'block') {
+      showLoggedMarketing(currentUser.email);
+    } else {
+      document.getElementById('app-user-email').textContent = currentUser.email;
     }
   } else {
     currentUser = null;
@@ -1374,12 +1270,11 @@ async function openApp() {
   }
   currentUser = user;
   try {
-    const nexusId = await getNexusId(user.id);
-    console.log('[Nexus Stock] Sessão ativa. user.id =', user.id, '| nexus_id =', nexusId);
+    console.log('[Nexus Stock] Sessão ativa. user.id =', user.id, '| email =', user.email);
     document.getElementById('marketing-site').style.display = 'none';
     document.getElementById('app-shell').style.display = 'block';
-    document.getElementById('app-user-email').textContent = nexusId || '';
-    document.getElementById('dash-greeting').textContent = 'Bem-vindo(a) de volta, ' + (nexusId || '');
+    document.getElementById('app-user-email').textContent = currentUser.email;
+    document.getElementById('dash-greeting').textContent = 'Bem-vindo(a) de volta, ' + currentUser.email;
     await loadAllData();
   } catch (err) {
     console.error('Erro ao abrir o painel:', err);
