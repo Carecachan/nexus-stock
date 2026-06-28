@@ -1003,25 +1003,56 @@ const sb = createClient(SUPA_URL, SUPA_KEY, {
 // Garante que sempre temos o usuário real da sessão ativa do client,
 // nunca uma cópia em memória que pode ficar fora de sincronia.
 async function getAuthedUser() {
-  const { data, error } = await sb.auth.getUser();
-  if (error || !data || !data.user) return null;
-  return data.user;
+  try {
+    const { data, error } = await withTimeout(sb.auth.getUser(), 10000);
+    if (error || !data || !data.user) return null;
+    return data.user;
+  } catch (e) {
+    console.error('getAuthedUser falhou/expirou:', e);
+    return null;
+  }
+}
+
+// Envolve qualquer Promise (em especial chamadas ao Supabase) com um
+// tempo-limite. Sem isso, se a rede travar ou o Supabase não responder,
+// o "await" nunca resolve e o botão fica em "Aguarde..." para sempre.
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('TIMEOUT: A operação demorou demais e foi cancelada (' + (ms / 1000) + 's). Verifique sua internet ou tente novamente.'));
+    }, ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); }
+    );
+  });
 }
 
 // Busca o ID Nexus (NX-00001) do usuário logado, lendo da tabela profiles.
 // É esse ID que aparece para a pessoa em toda a interface — o e-mail
 // nunca é mostrado, fica só por trás dos panos para o Supabase Auth.
 async function getNexusId(userId) {
-  const { data, error } = await sb.from('profiles').select('nexus_id').eq('id', userId).maybeSingle();
-  if (error || !data) return null;
-  return data.nexus_id;
+  try {
+    const { data, error } = await withTimeout(
+      sb.from('profiles').select('nexus_id').eq('id', userId).maybeSingle(),
+      10000
+    );
+    if (error || !data) return null;
+    return data.nexus_id;
+  } catch (e) {
+    console.error('getNexusId falhou/expirou:', e);
+    return null;
+  }
 }
 
 // Resolve um ID Nexus digitado no login para o e-mail real correspondente,
 // chamando a function segura no banco (não expõe a tabela inteira).
 async function resolveEmailFromNexusId(nexusId) {
-  const { data, error } = await sb.rpc('get_email_by_nexus_id', { p_nexus_id: nexusId });
-  if (error) return null;
+  const { data, error } = await withTimeout(
+    sb.rpc('get_email_by_nexus_id', { p_nexus_id: nexusId }),
+    10000
+  );
+  if (error) throw error;
   return data || null;
 }
 
@@ -1034,11 +1065,11 @@ function showMsg(id, text, type) {
   el.style.display = 'block';
 }
 function hideMsg(id) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
-function setBtn(id, loading, label) {
+function setBtn(id, loading, label, loadingLabel) {
   const b = document.getElementById(id);
   if (!b) return;
   b.disabled = loading;
-  b.textContent = loading ? 'Aguarde...' : label;
+  b.textContent = loading ? (loadingLabel || 'Aguarde...') : label;
 }
 function brl(n) {
   return (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -1119,7 +1150,14 @@ function showLoggedMarketing(nexusId) {
   document.getElementById('nav-cta-area').innerHTML =
     '<div class="nav-user-pill"><span class="nav-user-email">' + escapeHtml(nexusId || '') + '</span>' +
     '<button class="btn-nav-app" id="nav-btn-app">Abrir painel</button></div>';
-  document.getElementById('nav-btn-app').addEventListener('click', openApp);
+  document.getElementById('nav-btn-app').addEventListener('click', async function() {
+    setBtn('nav-btn-app', true, 'Abrir painel', 'Abrindo...');
+    try {
+      await openApp();
+    } finally {
+      setBtn('nav-btn-app', false, 'Abrir painel');
+    }
+  });
 }
 
 function showLoggedOutMarketing() {
@@ -1160,41 +1198,74 @@ document.getElementById('btn-signup').addEventListener('click', async function()
   if (pass !== confirm)            { showMsg('msg-signup','As senhas não coincidem.','error'); return; }
 
   setBtn('btn-signup', true, 'Criar conta gratuita');
-  var result = await sb.auth.signUp({ email: email, password: pass });
 
-  if (result.error) {
+  try {
+    var result = await withTimeout(sb.auth.signUp({ email: email, password: pass }), 15000);
+
+    if (result.error) {
+      var msg = result.error.message;
+      if (msg.includes('already registered') || msg.includes('already been registered')) msg = 'Este e-mail já está cadastrado. Tente fazer login.';
+      showMsg('msg-signup', msg, 'error');
+      return;
+    }
+
+    // Sem confirmação de e-mail ativada, o Supabase já retorna uma sessão válida.
+    // A pessoa entra direto, sem precisar confirmar nada.
+    if (result.data && result.data.session && result.data.user) {
+      currentUser = result.data.user;
+
+      // O trigger do banco gera o ID Nexus no instante do cadastro, mas pode
+      // levar um instante para o registro ficar visível. Tentamos algumas
+      // vezes antes de desistir, em vez de mostrar "não encontrado" de cara.
+      var nexusId = await getNexusIdComEspera(currentUser.id);
+
+      document.getElementById('card-signup').style.display = 'none';
+      if (nexusId) {
+        document.getElementById('novo-nexus-id').textContent = nexusId;
+        document.getElementById('card-id-criado').style.display = 'block';
+        document.getElementById('auth-title').textContent = 'Conta criada';
+      } else {
+        // Conta foi criada e a pessoa já está autenticada, mas o ID ainda
+        // não apareceu. Não bloqueia o acesso — leva direto pro painel.
+        showMsg('msg-signup', 'Conta criada! Não foi possível confirmar seu ID agora, mas você já pode acessar o painel.', 'success');
+        showLoggedMarketing(null);
+      }
+    } else {
+      // Fallback: caso a confirmação de e-mail esteja ativa no projeto.
+      showMsg('msg-signup', '✅ Conta criada! Verifique seu e-mail para confirmar o cadastro.', 'success');
+    }
+  } catch (err) {
+    console.error('Erro no cadastro:', err);
+    showMsg('msg-signup', 'Não foi possível criar a conta. ' + (err && err.message ? err.message : 'Tente novamente.'), 'error');
+  } finally {
     setBtn('btn-signup', false, 'Criar conta gratuita');
-    var msg = result.error.message;
-    if (msg.includes('already registered') || msg.includes('already been registered')) msg = 'Este e-mail já está cadastrado. Tente fazer login.';
-    showMsg('msg-signup', msg, 'error');
-    return;
-  }
-
-  // Sem confirmação de e-mail ativada, o Supabase já retorna uma sessão válida.
-  // A pessoa entra direto, sem precisar confirmar nada.
-  if (result.data && result.data.session && result.data.user) {
-    currentUser = result.data.user;
-
-    // O trigger do banco já gerou o ID Nexus no instante do cadastro.
-    // Buscamos esse ID para mostrar à pessoa — é com ele que ela vai logar.
-    var nexusId = await getNexusId(currentUser.id);
-    setBtn('btn-signup', false, 'Criar conta gratuita');
-
-    document.getElementById('card-signup').style.display = 'none';
-    document.getElementById('novo-nexus-id').textContent = nexusId || 'Não encontrado';
-    document.getElementById('card-id-criado').style.display = 'block';
-    document.getElementById('auth-title').textContent = 'Conta criada';
-  } else {
-    // Fallback: caso a confirmação de e-mail esteja ativa no projeto.
-    setBtn('btn-signup', false, 'Criar conta gratuita');
-    showMsg('msg-signup', '✅ Conta criada! Verifique seu e-mail para confirmar o cadastro.', 'success');
   }
 });
 
+// Tenta buscar o nexus_id algumas vezes, com pequena espera entre as
+// tentativas, para cobrir o instante entre o cadastro e o trigger do
+// banco terminar de criar a linha em profiles.
+async function getNexusIdComEspera(userId) {
+  for (var i = 0; i < 4; i++) {
+    var id = await getNexusId(userId);
+    if (id) return id;
+    await new Promise(function(r) { setTimeout(r, 700); });
+  }
+  return null;
+}
+
 document.getElementById('btn-id-criado-continuar').addEventListener('click', async function() {
-  var nexusId = await getNexusId(currentUser.id);
-  document.getElementById('card-id-criado').style.display = 'none';
-  showLoggedMarketing(nexusId);
+  setBtn('btn-id-criado-continuar', true, 'Abrir painel da empresa →', 'Abrindo...');
+  try {
+    var nexusId = await getNexusId(currentUser.id);
+    document.getElementById('card-id-criado').style.display = 'none';
+    showLoggedMarketing(nexusId);
+  } catch (err) {
+    console.error('Erro ao continuar após cadastro:', err);
+    toast('Não foi possível abrir o painel agora. Tente novamente.', true);
+  } finally {
+    setBtn('btn-id-criado-continuar', false, 'Abrir painel da empresa →');
+  }
 });
 
 // ── LOGIN ──
@@ -1207,53 +1278,83 @@ document.getElementById('btn-login').addEventListener('click', async function() 
 
   setBtn('btn-login', true, 'Entrar');
 
-  var nexusId = nexusIdRaw.toUpperCase();
-  var email = await resolveEmailFromNexusId(nexusId);
+  try {
+    var nexusId = nexusIdRaw.toUpperCase();
+    var email = await resolveEmailFromNexusId(nexusId);
 
-  if (!email) {
+    if (!email) {
+      showMsg('msg-login', 'ID não encontrado. Verifique e tente novamente.', 'error');
+      return;
+    }
+
+    var result = await withTimeout(sb.auth.signInWithPassword({ email: email, password: pass }), 15000);
+
+    if (result.error) {
+      showMsg('msg-login', 'ID ou senha incorretos.', 'error');
+    } else {
+      currentUser = result.data.user;
+      showLoggedMarketing(nexusId);
+    }
+  } catch (err) {
+    console.error('Erro no login:', err);
+    showMsg('msg-login', 'Não foi possível entrar. ' + (err && err.message ? err.message : 'Tente novamente.'), 'error');
+  } finally {
     setBtn('btn-login', false, 'Entrar');
-    showMsg('msg-login', 'ID não encontrado. Verifique e tente novamente.', 'error');
-    return;
-  }
-
-  var result = await sb.auth.signInWithPassword({ email: email, password: pass });
-  setBtn('btn-login', false, 'Entrar');
-
-  if (result.error) {
-    showMsg('msg-login', 'ID ou senha incorretos.', 'error');
-  } else {
-    currentUser = result.data.user;
-    showLoggedMarketing(nexusId);
   }
 });
 
 // ── LOGOUT (marketing card) ──
 document.getElementById('btn-logout').addEventListener('click', async function() {
-  await sb.auth.signOut();
-  currentUser = null;
-  showLoggedOutMarketing();
+  setBtn('btn-logout', true, 'Sair da conta', 'Saindo...');
+  try {
+    await withTimeout(sb.auth.signOut(), 8000);
+  } catch (err) {
+    console.error('Erro ao sair (saindo mesmo assim localmente):', err);
+  } finally {
+    currentUser = null;
+    setBtn('btn-logout', false, 'Sair da conta');
+    showLoggedOutMarketing();
+  }
 });
 
 // ── LOGOUT (dentro do app) ──
 document.getElementById('app-btn-logout').addEventListener('click', async function() {
-  await sb.auth.signOut();
-  currentUser = null;
-  closeApp();
-  showLoggedOutMarketing();
+  setBtn('app-btn-logout', true, 'Sair', 'Saindo...');
+  try {
+    await withTimeout(sb.auth.signOut(), 8000);
+  } catch (err) {
+    console.error('Erro ao sair (saindo mesmo assim localmente):', err);
+  } finally {
+    currentUser = null;
+    setBtn('app-btn-logout', false, 'Sair');
+    closeApp();
+    showLoggedOutMarketing();
+  }
 });
 
-document.getElementById('btn-go-app').addEventListener('click', openApp);
+document.getElementById('btn-go-app').addEventListener('click', async function() {
+  setBtn('btn-go-app', true, 'Abrir painel da empresa →', 'Abrindo...');
+  try {
+    await openApp();
+  } finally {
+    setBtn('btn-go-app', false, 'Abrir painel da empresa →');
+  }
+});
 
 // ── Manter currentUser sempre sincronizado com a sessão real do client ──
 // (login, logout, refresh de token, restauração de sessão ao recarregar a página)
 sb.auth.onAuthStateChange(async function(event, session) {
   if (session && session.user) {
     currentUser = session.user;
-    var nexusId = await getNexusId(currentUser.id);
-    if (document.getElementById('app-shell').style.display !== 'block') {
-      showLoggedMarketing(nexusId);
-    } else {
-      document.getElementById('app-user-email').textContent = nexusId || '';
+    try {
+      var nexusId = await getNexusId(currentUser.id);
+      if (document.getElementById('app-shell').style.display !== 'block') {
+        showLoggedMarketing(nexusId);
+      } else {
+        document.getElementById('app-user-email').textContent = nexusId || '';
+      }
+    } catch (err) {
+      console.error('Erro ao sincronizar sessão:', err);
     }
   } else {
     currentUser = null;
@@ -1272,13 +1373,18 @@ async function openApp() {
     return;
   }
   currentUser = user;
-  const nexusId = await getNexusId(user.id);
-  console.log('[Nexus Stock] Sessão ativa. user.id =', user.id, '| nexus_id =', nexusId);
-  document.getElementById('marketing-site').style.display = 'none';
-  document.getElementById('app-shell').style.display = 'block';
-  document.getElementById('app-user-email').textContent = nexusId || '';
-  document.getElementById('dash-greeting').textContent = 'Bem-vindo(a) de volta, ' + (nexusId || '');
-  await loadAllData();
+  try {
+    const nexusId = await getNexusId(user.id);
+    console.log('[Nexus Stock] Sessão ativa. user.id =', user.id, '| nexus_id =', nexusId);
+    document.getElementById('marketing-site').style.display = 'none';
+    document.getElementById('app-shell').style.display = 'block';
+    document.getElementById('app-user-email').textContent = nexusId || '';
+    document.getElementById('dash-greeting').textContent = 'Bem-vindo(a) de volta, ' + (nexusId || '');
+    await loadAllData();
+  } catch (err) {
+    console.error('Erro ao abrir o painel:', err);
+    toast('Não foi possível abrir o painel agora. Tente novamente.', true);
+  }
 }
 function closeApp() {
   document.getElementById('app-shell').style.display = 'none';
@@ -1310,10 +1416,10 @@ document.querySelectorAll('[data-goto]').forEach(btn => {
 // ══════════════════════════════════════════════
 async function loadAllData() {
   try {
-    const [prodRes, movRes] = await Promise.all([
+    const [prodRes, movRes] = await withTimeout(Promise.all([
       sb.from('products').select('*').order('created_at', { ascending: false }),
       sb.from('stock_movements').select('*').order('created_at', { ascending: false }).limit(200)
-    ]);
+    ]), 15000);
 
     if (prodRes.error) throw prodRes.error;
     if (movRes.error) throw movRes.error;
@@ -1484,16 +1590,22 @@ document.getElementById('edit-save').addEventListener('click', async () => {
   if (isNaN(limite) || limite < 0) { showMsg('edit-msg', 'Informe um limite válido para alerta de estoque.', 'error'); return; }
 
   setBtn('edit-save', true, 'Salvar alterações');
-  const { error } = await sb.from('products').update({
-    name, price, category, low_stock_threshold: limite, updated_at: new Date().toISOString()
-  }).eq('id', id);
-  setBtn('edit-save', false, 'Salvar alterações');
+  try {
+    const { error } = await withTimeout(sb.from('products').update({
+      name, price, category, low_stock_threshold: limite, updated_at: new Date().toISOString()
+    }).eq('id', id), 15000);
 
-  if (error) { showMsg('edit-msg', 'Erro ao salvar: ' + error.message, 'error'); return; }
+    if (error) { showMsg('edit-msg', 'Erro ao salvar: ' + error.message, 'error'); return; }
 
-  document.getElementById('modal-edit').classList.remove('open');
-  toast('Produto atualizado com sucesso.');
-  await loadAllData();
+    document.getElementById('modal-edit').classList.remove('open');
+    toast('Produto atualizado com sucesso.');
+    await loadAllData();
+  } catch (err) {
+    console.error('Erro ao salvar produto:', err);
+    showMsg('edit-msg', 'Não foi possível salvar. ' + (err && err.message ? err.message : 'Tente novamente.'), 'error');
+  } finally {
+    setBtn('edit-save', false, 'Salvar alterações');
+  }
 });
 
 // ── Modal: Excluir produto ──
@@ -1505,13 +1617,19 @@ document.getElementById('delete-cancel').addEventListener('click', () => documen
 document.getElementById('delete-confirm').addEventListener('click', async () => {
   const id = document.getElementById('delete-id').value;
   setBtn('delete-confirm', true, 'Excluir produto');
-  const { error } = await sb.from('products').delete().eq('id', id);
-  setBtn('delete-confirm', false, 'Excluir produto');
-
-  document.getElementById('modal-delete').classList.remove('open');
-  if (error) { toast('Erro ao excluir: ' + error.message, true); return; }
-  toast('Produto excluído.');
-  await loadAllData();
+  try {
+    const { error } = await withTimeout(sb.from('products').delete().eq('id', id), 15000);
+    document.getElementById('modal-delete').classList.remove('open');
+    if (error) { toast('Erro ao excluir: ' + error.message, true); return; }
+    toast('Produto excluído.');
+    await loadAllData();
+  } catch (err) {
+    console.error('Erro ao excluir produto:', err);
+    document.getElementById('modal-delete').classList.remove('open');
+    toast('Não foi possível excluir. ' + (err && err.message ? err.message : 'Tente novamente.'), true);
+  } finally {
+    setBtn('delete-confirm', false, 'Excluir produto');
+  }
 });
 
 // ── Modal: Movimentar estoque (entrada/saída) ──
@@ -1535,51 +1653,56 @@ document.getElementById('move-confirm').addEventListener('click', async () => {
   const qtd = parseInt(document.getElementById('move-qtd').value, 10);
   const product = products.find(p => p.id === id);
 
+  if (!product) { showMsg('move-msg', 'Produto não encontrado. Atualize a página e tente novamente.', 'error'); return; }
   if (!qtd || qtd <= 0) { showMsg('move-msg', 'Informe uma quantidade válida.', 'error'); return; }
   if (type === 'saida' && qtd > Number(product.quantity)) {
     showMsg('move-msg', 'Quantidade maior que o estoque disponível (' + product.quantity + ').', 'error');
     return;
   }
 
-  const user = await getAuthedUser();
-  if (!user) {
-    showMsg('move-msg', 'Sua sessão expirou. Saia e entre novamente para continuar.', 'error');
-    return;
-  }
-
-  const novaQtd = type === 'entrada' ? Number(product.quantity) + qtd : Number(product.quantity) - qtd;
-
   setBtn('move-confirm', true, 'Confirmar');
 
-  const { error: updError } = await sb.from('products').update({
-    quantity: novaQtd, updated_at: new Date().toISOString()
-  }).eq('id', id);
+  try {
+    const user = await getAuthedUser();
+    if (!user) {
+      showMsg('move-msg', 'Sua sessão expirou. Saia e entre novamente para continuar.', 'error');
+      return;
+    }
 
-  if (updError) {
+    const novaQtd = type === 'entrada' ? Number(product.quantity) + qtd : Number(product.quantity) - qtd;
+
+    const { error: updError } = await withTimeout(sb.from('products').update({
+      quantity: novaQtd, updated_at: new Date().toISOString()
+    }).eq('id', id), 15000);
+
+    if (updError) {
+      showMsg('move-msg', 'Erro: ' + updError.message, 'error');
+      return;
+    }
+
+    const { error: movError } = await withTimeout(sb.from('stock_movements').insert({
+      user_id: user.id,
+      product_id: id,
+      product_name: product.name,
+      type: type,
+      quantity: qtd,
+      unit_price: product.price
+    }), 15000);
+
+    if (movError) {
+      toast('Estoque atualizado, mas houve erro ao salvar o histórico: ' + movError.message, true);
+    } else {
+      toast(type === 'entrada' ? 'Entrada registrada com sucesso.' : 'Saída registrada com sucesso.');
+    }
+
+    document.getElementById('modal-move').classList.remove('open');
+    await loadAllData();
+  } catch (err) {
+    console.error('Erro ao movimentar estoque:', err);
+    showMsg('move-msg', 'Não foi possível concluir. ' + (err && err.message ? err.message : 'Tente novamente.'), 'error');
+  } finally {
     setBtn('move-confirm', false, 'Confirmar');
-    showMsg('move-msg', 'Erro: ' + updError.message, 'error');
-    return;
   }
-
-  const { error: movError } = await sb.from('stock_movements').insert({
-    user_id: user.id,
-    product_id: id,
-    product_name: product.name,
-    type: type,
-    quantity: qtd,
-    unit_price: product.price
-  });
-
-  setBtn('move-confirm', false, 'Confirmar');
-
-  if (movError) {
-    toast('Estoque atualizado, mas houve erro ao salvar o histórico: ' + movError.message, true);
-  } else {
-    toast(type === 'entrada' ? 'Entrada registrada com sucesso.' : 'Saída registrada com sucesso.');
-  }
-
-  document.getElementById('modal-move').classList.remove('open');
-  await loadAllData();
 });
 
 // ══════════════════════════════════════════════
@@ -1600,44 +1723,49 @@ document.getElementById('btn-add-produto').addEventListener('click', async () =>
   if (isNaN(preco) || preco < 0) { showMsg('add-msg', 'Informe um preço válido.', 'error'); return; }
   if (isNaN(limite) || limite < 0) { showMsg('add-msg', 'Informe um limite de alerta válido.', 'error'); return; }
 
-  const user = await getAuthedUser();
-  if (!user) {
-    showMsg('add-msg', 'Sua sessão expirou. Saia e entre novamente para continuar.', 'error');
-    return;
-  }
-
   setBtn('btn-add-produto', true, 'Adicionar ao estoque');
 
-  const { error } = await sb.from('products').insert({
-    user_id: user.id,
-    name: nome,
-    quantity: qtd,
-    price: preco,
-    category: categoria,
-    low_stock_threshold: limite
-  });
-
-  setBtn('btn-add-produto', false, 'Adicionar ao estoque');
-
-  if (error) {
-    console.error('Erro ao adicionar produto. user.id enviado:', user.id, 'Detalhes:', error);
-    if (error.code === '42501' || (error.message || '').includes('row-level security')) {
-      showMsg('add-msg', 'Erro de permissão ao salvar. Saia da conta, entre novamente e tente de novo. Se persistir, as políticas de segurança do banco precisam ser revisadas.', 'error');
-    } else {
-      showMsg('add-msg', 'Erro ao adicionar produto: ' + error.message, 'error');
+  try {
+    const user = await getAuthedUser();
+    if (!user) {
+      showMsg('add-msg', 'Sua sessão expirou. Saia e entre novamente para continuar.', 'error');
+      return;
     }
-    return;
+
+    const { error } = await withTimeout(sb.from('products').insert({
+      user_id: user.id,
+      name: nome,
+      quantity: qtd,
+      price: preco,
+      category: categoria,
+      low_stock_threshold: limite
+    }), 15000);
+
+    if (error) {
+      console.error('Erro ao adicionar produto. user.id enviado:', user.id, 'Detalhes:', error);
+      if (error.code === '42501' || (error.message || '').includes('row-level security')) {
+        showMsg('add-msg', 'Erro de permissão ao salvar. Saia da conta, entre novamente e tente de novo. Se persistir, as políticas de segurança do banco precisam ser revisadas.', 'error');
+      } else {
+        showMsg('add-msg', 'Erro ao adicionar produto: ' + error.message, 'error');
+      }
+      return;
+    }
+
+    showMsg('add-msg', '✅ Produto adicionado com sucesso!', 'success');
+    document.getElementById('add-nome').value = '';
+    document.getElementById('add-qtd').value = '';
+    document.getElementById('add-preco').value = '';
+    document.getElementById('add-categoria').value = '';
+    document.getElementById('add-limite').value = '';
+
+    await loadAllData();
+    setTimeout(() => goto('view-estoque'), 700);
+  } catch (err) {
+    console.error('Erro ao adicionar produto:', err);
+    showMsg('add-msg', 'Não foi possível adicionar o produto. ' + (err && err.message ? err.message : 'Tente novamente.'), 'error');
+  } finally {
+    setBtn('btn-add-produto', false, 'Adicionar ao estoque');
   }
-
-  showMsg('add-msg', '✅ Produto adicionado com sucesso!', 'success');
-  document.getElementById('add-nome').value = '';
-  document.getElementById('add-qtd').value = '';
-  document.getElementById('add-preco').value = '';
-  document.getElementById('add-categoria').value = '';
-  document.getElementById('add-limite').value = '';
-
-  await loadAllData();
-  setTimeout(() => goto('view-estoque'), 700);
 });
 
 // ══════════════════════════════════════════════
